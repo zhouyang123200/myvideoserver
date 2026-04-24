@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>在线视频播放</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    h1 { text-align: center; margin-bottom: 24px; font-size: 1.6rem; letter-spacing: 1px; }
+    .container { max-width: 1000px; margin: 0 auto; }
+    .player-wrap {
+      background: #16213e;
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+    #video {
+      width: 100%;
+      background: #000;
+      border-radius: 6px;
+      display: block;
+    }
+    .info-bar {
+      margin-top: 12px;
+      font-size: 0.9rem;
+      color: #aaa;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .video-title { font-size: 1.1rem; font-weight: bold; color: #e0e0e0; margin-bottom: 10px; }
+    .video-list {
+      margin-top: 28px;
+    }
+    .video-list h2 { margin-bottom: 14px; font-size: 1.1rem; color: #ccc; }
+    .video-item {
+      padding: 12px 16px;
+      background: #16213e;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .video-item:hover { background: #0f3460; }
+    .video-item.active { background: #0f3460; border-left: 4px solid #e94560; }
+    .video-item .vtitle { font-size: 0.97rem; }
+    .video-item .vdur { font-size: 0.82rem; color: #888; }
+    .status { color: #e94560; }
+    .ok { color: #4caf50; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎬 HLS 视频点播</h1>
+
+    <div class="player-wrap">
+      <div class="video-title" id="videoTitle">请从下方列表中选择视频</div>
+      <video id="video" controls></video>
+      <div class="info-bar">
+        <span id="infoProgress">–</span>
+        <span id="infoSave">–</span>
+      </div>
+    </div>
+
+    <div class="video-list">
+      <h2>视频列表</h2>
+      <div id="videoList">加载中...</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <script>
+    const video = document.getElementById('video');
+    const videoTitle = document.getElementById('videoTitle');
+    const infoProgress = document.getElementById('infoProgress');
+    const infoSave = document.getElementById('infoSave');
+    const videoListEl = document.getElementById('videoList');
+
+    let currentVideoId = null;
+    let saveTimer = null;
+    let hlsInstance = null;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    function fmtTime(sec) {
+      if (!sec || isNaN(sec)) return '0:00';
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    async function apiFetch(url, options) {
+      const resp = await fetch(url, options);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${url}`);
+      return resp.json();
+    }
+
+    // ── Progress Save ────────────────────────────────────────────────────────
+
+    async function saveProgress(progressSeconds, durationSeconds) {
+      if (!currentVideoId) return;
+      try {
+        await apiFetch(`/api/videos/${currentVideoId}/progress`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ progressSeconds, durationSeconds })
+        });
+        infoSave.textContent = `✅ 进度已保存: ${fmtTime(progressSeconds)}`;
+        infoSave.className = 'ok';
+      } catch (e) {
+        infoSave.textContent = '⚠️ 进度保存失败';
+        infoSave.className = 'status';
+      }
+    }
+
+    function startAutoSave() {
+      if (saveTimer) clearInterval(saveTimer);
+      saveTimer = setInterval(() => {
+        if (!video.paused && !video.ended && video.readyState > 1) {
+          saveProgress(Math.floor(video.currentTime), Math.floor(video.duration || 0));
+        }
+      }, 10000);
+    }
+
+    // ── Player Init ──────────────────────────────────────────────────────────
+
+    function loadHLS(src, lastProgress) {
+      if (hlsInstance) {
+        hlsInstance.destroy();
+        hlsInstance = null;
+      }
+
+      if (Hls.isSupported()) {
+        hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: false });
+        hlsInstance.loadSource(src);
+        hlsInstance.attachMedia(video);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (lastProgress > 0) video.currentTime = lastProgress;
+          video.play().catch(() => {});
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = src;
+        video.addEventListener('loadedmetadata', () => {
+          if (lastProgress > 0) video.currentTime = lastProgress;
+          video.play().catch(() => {});
+        }, { once: true });
+      } else {
+        infoProgress.textContent = '❌ 当前浏览器不支持 HLS 播放';
+      }
+    }
+
+    async function playVideo(videoId) {
+      currentVideoId = videoId;
+      infoProgress.textContent = '加载中...';
+      infoSave.textContent = '–';
+
+      try {
+        const data = await apiFetch(`/api/videos/${videoId}/play`);
+        videoTitle.textContent = data.title;
+        infoProgress.textContent = `上次播放位置: ${fmtTime(data.lastProgressSeconds)}`;
+        loadHLS(data.playUrl, data.lastProgressSeconds);
+        startAutoSave();
+      } catch (e) {
+        infoProgress.textContent = '❌ 加载播放信息失败';
+        infoProgress.className = 'status';
+      }
+    }
+
+    // ── Event Listeners ──────────────────────────────────────────────────────
+
+    video.addEventListener('pause', () => {
+      if (!video.ended) {
+        saveProgress(Math.floor(video.currentTime), Math.floor(video.duration || 0));
+      }
+    });
+
+    video.addEventListener('ended', () => {
+      saveProgress(0, Math.floor(video.duration || 0));
+      infoProgress.textContent = '✅ 播放完毕，进度已重置';
+    });
+
+    video.addEventListener('timeupdate', () => {
+      if (video.duration) {
+        infoProgress.textContent =
+          `当前进度: ${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+      }
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (currentVideoId && !video.ended && video.readyState > 1) {
+        navigator.sendBeacon(
+          `/api/videos/${currentVideoId}/progress`,
+          new Blob([JSON.stringify({
+            progressSeconds: Math.floor(video.currentTime),
+            durationSeconds: Math.floor(video.duration || 0)
+          })], { type: 'application/json' })
+        );
+      }
+    });
+
+    // ── Video List ───────────────────────────────────────────────────────────
+
+    async function loadVideoList() {
+      try {
+        const videos = await apiFetch('/api/videos');
+        if (!videos.length) {
+          videoListEl.innerHTML = '<p style="color:#888">暂无视频，请先添加视频并插入数据库记录。</p>';
+          return;
+        }
+        videoListEl.innerHTML = '';
+        videos.forEach(v => {
+          const item = document.createElement('div');
+          item.className = 'video-item';
+          item.dataset.id = v.id;
+          item.innerHTML = `
+            <span class="vtitle">${v.title}</span>
+            <span class="vdur">${fmtTime(v.duration_seconds)}</span>
+          `;
+          item.addEventListener('click', () => {
+            document.querySelectorAll('.video-item').forEach(el => el.classList.remove('active'));
+            item.classList.add('active');
+            playVideo(v.id);
+          });
+          videoListEl.appendChild(item);
+        });
+      } catch (e) {
+        videoListEl.innerHTML = '<p class="status">❌ 加载视频列表失败</p>';
+      }
+    }
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+    loadVideoList();
+  </script>
+</body>
+</html>
