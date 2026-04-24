@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -8,15 +10,6 @@ from app.models import User, Video, VideoPlayProgress
 from app.schemas import PlayResponse, ProgressUpdate, VideoItem
 
 Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="Video Streaming Service")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Demo user: user_id=1, username="test"
 CURRENT_USER_ID = 1
@@ -40,13 +33,24 @@ def ensure_demo_user(db: Session) -> None:
         db.commit()
 
 
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(application: FastAPI):
     db = SessionLocal()
     try:
         ensure_demo_user(db)
     finally:
         db.close()
+    yield
+
+
+app = FastAPI(title="Video Streaming Service", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/api/health")
